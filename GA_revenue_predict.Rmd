@@ -1,0 +1,665 @@
+---
+title: "Google Analytics Customer Revenue Prediction"
+author: "Vitawat Ngammuangpak"
+date: "10/26/2018"
+output: html_document
+---
+
+```{r}
+library(readr)
+library(data.table)
+library(tidyverse)
+library(jsonlite)
+library(bit64)
+library(dplyr)
+library(ggplot2)
+library(reshape2)
+library(caret)
+library(Metrics)
+library(Matrix)
+library(gbm)
+#-----------------------------------------------------
+# Read data file and manage json column
+#-----------------------------------------------------
+
+Sys.time()
+setwd("/Users/vitawat/documents/Rdata/GACustomerRevenue/")
+train <- fread("train.csv", header = TRUE)
+test <- fread("test.csv", header = TRUE)
+submission <- fread("sample_submission.csv", header = TRUE)
+
+# Merge train and total
+train$index <- 1   
+test$index <- 2
+total <- rbind(train,test)
+total$device <- gsub('""', '"',total$device)
+total$geoNetwork <- gsub('""', '"',total$geoNetwork)
+total$totals <- gsub('""', '"',total$totals)
+total$trafficSource <- gsub('""', '"',total$trafficSource)
+
+# unnest json
+t_device<- paste("[",paste(total$device, collapse = ","),"]") %>% fromJSON(flatten = T)
+t_geoNetwork<- paste("[",paste(total$geoNetwork, collapse = ","),"]") %>% fromJSON(flatten = T)
+t_totals<- paste("[",paste(total$totals, collapse = ","),"]") %>% fromJSON(flatten = T)
+t_trafficSource<- paste("[",paste(total$trafficSource, collapse = ","),"]") %>% fromJSON(flatten = T)
+
+# add new column and remove json column
+total <- total %>% cbind(t_device,t_geoNetwork,t_totals,t_trafficSource) %>% select(-device, -geoNetwork, -totals, -trafficSource)
+
+# remove temporary data
+rm(t_device); rm(t_geoNetwork); rm(t_totals); rm(t_trafficSource)
+
+# new train and new test
+train <- total[total$index == 1,]
+test <- total[total$index == 2,]
+
+# remove index
+train$index <- NULL
+test$index <- NULL
+
+# save new train and new test
+write.csv(train,"train_flat.csv", row.names = F)
+write.csv(test,"test_flat.csv", row.names = F)
+Sys.time()
+
+# Unnest json done !!!!!!!!!
+```
+
+```{r}
+#-----------------------------------------------------
+# Data cleaning 1
+#-----------------------------------------------------
+
+train <- fread("train_flat.csv", header = TRUE)
+test <- fread("test_flat.csv", header = TRUE)
+
+# Merge train and total
+train$index <- 1   
+test$index <- 2
+total <- rbind(train,test)
+rm(train); rm(test)
+
+# remove some column 
+total$sessionId <- NULL
+total$socialEngagementType <- NULL
+total$visitId <- NULL
+total$browserVersion <- NULL
+total$browserSize <- NULL
+total$operatingSystemVersion <- NULL
+total$mobileDeviceBranding <- NULL
+total$mobileDeviceModel <- NULL
+total$mobileInputSelector <- NULL
+total$mobileDeviceInfo <- NULL
+total$mobileDeviceMarketingName <- NULL
+total$flashVersion <- NULL
+total$language <- NULL
+total$screenColors <- NULL
+total$screenResolution <- NULL
+total$cityId <- NULL
+total$latitude <- NULL
+total$longitude <- NULL
+total$networkLocation <- NULL
+total$adwordsClickInfo.criteriaParameters <- NULL
+
+# 
+total[total == "not available in demo dataset"] <- NA
+total[total == "(not set)"] <- NA
+total[total == "unknow.unknow"] <- NA
+total[total == "(not provided)"] <- NA
+
+total$date <- NULL
+total$visitNumber <- NULL
+total$visitStartTime <- NULL
+total$isMobile[total$isMobile == TRUE] <- "mobile"
+total$isMobile[total$isMobile == FALSE] <- "desktop"
+
+# new train and new test
+train <- total[total$index == 1,]
+test <- total[total$index == 2,]
+
+# remove index
+train$index <- NULL
+test$index <- NULL
+rm(total)
+
+# save new train and new test
+write.csv(train,"trainNew1.csv", row.names = F)
+write.csv(test,"testNew1.csv", row.names = F)
+
+```
+
+
+```{r}
+#-----------------------------------------------------
+# Create Feature
+#-----------------------------------------------------
+train <- fread("trainNew1.csv", header = TRUE)
+test <- fread("testNew1.csv", header = TRUE)
+#-----------------------------------------------------
+# Train data set
+#-----------------------------------------------------
+# channel
+temp <- train %>% select(fullVisitorId, channelGrouping)
+channel <- dcast(temp, fullVisitorId ~ channelGrouping)
+colnames(channel) <- paste0("channel.",colnames(channel))
+colnames(channel)[1] <- "fullVisitorId"
+
+# browser
+temp <- train %>% select(fullVisitorId, browser)
+browser <- dcast(temp, fullVisitorId ~ browser)
+colnames(browser) <- paste0("browser.",colnames(browser))
+colnames(browser)[1] <- "fullVisitorId"
+
+# operatingSystem
+temp <- train %>% select(fullVisitorId, operatingSystem)
+operatingSystem <- dcast(temp, fullVisitorId ~ operatingSystem)
+colnames(operatingSystem) <- paste0("operatingSystem.",colnames(operatingSystem))
+colnames(operatingSystem)[1] <- "fullVisitorId"
+
+# deviceCategory
+temp <- train %>% select(fullVisitorId, deviceCategory)
+deviceCategory <- dcast(temp, fullVisitorId ~ deviceCategory)
+colnames(deviceCategory) <- paste0("deviceCategory.",colnames(deviceCategory))
+colnames(deviceCategory)[1] <- "fullVisitorId"
+
+# continent
+temp <- train %>% select(fullVisitorId, continent)
+continent <- dcast(temp, fullVisitorId ~ continent)
+colnames(continent) <- paste0("continent.",colnames(continent))
+colnames(continent)[1] <- "fullVisitorId"
+
+# subContinent
+temp <- train %>% select(fullVisitorId, subContinent)
+subContinent <- dcast(temp, fullVisitorId ~ subContinent)
+colnames(subContinent) <- paste0("subContinent.",colnames(subContinent))
+colnames(subContinent)[1] <- "fullVisitorId"
+
+# medium
+temp <- train %>% select(fullVisitorId, medium)
+medium <- dcast(temp, fullVisitorId ~ medium)
+colnames(medium) <- paste0("medium.",colnames(medium))
+colnames(medium)[1] <- "fullVisitorId"
+
+# campaign
+temp <- train %>% select(fullVisitorId, campaign)
+campaign <- dcast(temp, fullVisitorId ~ campaign)
+colnames(campaign) <- paste0("campaign",colnames(campaign))
+colnames(campaign)[1] <- "fullVisitorId"
+
+# visit, hit, pageviews, bounces, transactionRevenue
+train$visits <- as.numeric(train$visits)
+train$hits <- as.numeric(train$hits)
+train$pageviews <- as.numeric(train$pageviews)
+train$bounces <- as.numeric(train$bounces)
+train$transactionRevenue <- as.numeric(train$transactionRevenue)
+train$visits[is.na(train$visits)] <- 0
+train$hits[is.na(train$hits)] <- 0
+train$pageviews[is.na(train$pageviews)] <- 0
+train$bounces[is.na(train$bounces)] <- 0
+train$transactionRevenue[is.na(train$transactionRevenue)] <- 0
+sumTran <- group_by(train, fullVisitorId) %>%
+  summarise (sumVisits = sum(visits),
+             sumHits = sum(hits),
+             sumPageviews = sum(pageviews),
+             sumBounces = sum(bounces),
+             sumTransactionRevenue = sum(transactionRevenue),
+             countVisits = length(visits))
+
+# fullVisitorId
+temp <- train[, 1:3]
+train_temp <- data.frame(unique(temp$fullVisitorId))
+colnames(train_temp)[1] <- "fullVisitorId"
+
+# Merge 
+train_temp <- train_temp %>%
+  left_join(channel, by = "fullVisitorId") %>%
+  left_join(browser, by = "fullVisitorId") %>%
+  left_join(operatingSystem, by = "fullVisitorId") %>%  
+  left_join(deviceCategory, by = "fullVisitorId") %>%
+  left_join(continent, by = "fullVisitorId") %>%
+  left_join(subContinent, by = "fullVisitorId") %>%
+  left_join(medium, by = "fullVisitorId") %>%
+  left_join(campaign, by = "fullVisitorId") %>%
+  left_join(sumTran, by = "fullVisitorId")
+
+write.csv(train_temp,"train1.csv", row.names = F)
+
+#-----------------------------------------------------
+# Test data set
+#-----------------------------------------------------
+# channel
+temp <- test %>% select(fullVisitorId, channelGrouping)
+channel <- dcast(temp, fullVisitorId ~ channelGrouping)
+colnames(channel) <- paste0("channel.",colnames(channel))
+colnames(channel)[1] <- "fullVisitorId"
+
+# browser
+temp <- test %>% select(fullVisitorId, browser)
+browser <- dcast(temp, fullVisitorId ~ browser)
+colnames(browser) <- paste0("browser.",colnames(browser))
+colnames(browser)[1] <- "fullVisitorId"
+
+# operatingSystem
+temp <- test %>% select(fullVisitorId, operatingSystem)
+operatingSystem <- dcast(temp, fullVisitorId ~ operatingSystem)
+colnames(operatingSystem) <- paste0("operatingSystem.",colnames(operatingSystem))
+colnames(operatingSystem)[1] <- "fullVisitorId"
+
+# deviceCategory
+temp <- test %>% select(fullVisitorId, deviceCategory)
+deviceCategory <- dcast(temp, fullVisitorId ~ deviceCategory)
+colnames(deviceCategory) <- paste0("deviceCategory.",colnames(deviceCategory))
+colnames(deviceCategory)[1] <- "fullVisitorId"
+
+# continent
+temp <- test %>% select(fullVisitorId, continent)
+continent <- dcast(temp, fullVisitorId ~ continent)
+colnames(continent) <- paste0("continent.",colnames(continent))
+colnames(continent)[1] <- "fullVisitorId"
+
+# subContinent
+temp <- test %>% select(fullVisitorId, subContinent)
+subContinent <- dcast(temp, fullVisitorId ~ subContinent)
+colnames(subContinent) <- paste0("subContinent.",colnames(subContinent))
+colnames(subContinent)[1] <- "fullVisitorId"
+
+# medium
+temp <- test %>% select(fullVisitorId, medium)
+medium <- dcast(temp, fullVisitorId ~ medium)
+colnames(medium) <- paste0("medium.",colnames(medium))
+colnames(medium)[1] <- "fullVisitorId"
+
+# campaign
+temp <- train %>% select(fullVisitorId, campaign)
+campaign <- dcast(temp, fullVisitorId ~ campaign)
+colnames(campaign) <- paste0("campaign",colnames(campaign))
+colnames(campaign)[1] <- "fullVisitorId"
+
+# visit, hit, pageviews, bounces, transactionRevenue
+test$visits <- as.numeric(test$visits)
+test$hits <- as.numeric(test$hits)
+test$pageviews <- as.numeric(test$pageviews)
+test$bounces <- as.numeric(test$bounces)
+test$transactionRevenue <- as.numeric(test$transactionRevenue)
+test$visits[is.na(test$visits)] <- 0
+test$hits[is.na(test$hits)] <- 0
+test$pageviews[is.na(test$pageviews)] <- 0
+test$bounces[is.na(test$bounces)] <- 0
+test$transactionRevenue[is.na(test$transactionRevenue)] <- 0
+sumTran <- group_by(test, fullVisitorId) %>%
+  summarise (sumVisits = sum(visits),
+             sumHits = sum(hits),
+             sumPageviews = sum(pageviews),
+             sumBounces = sum(bounces),
+             sumTransactionRevenue = sum(transactionRevenue),
+             countVisits = length(visits))
+
+# fullVisitorId
+temp <- test[, 1:3]
+test_temp <- data.frame(unique(temp$fullVisitorId))
+colnames(test_temp)[1] <- "fullVisitorId"
+
+# Merge 
+test_temp <- test_temp %>%
+  left_join(channel, by = "fullVisitorId") %>%
+  left_join(browser, by = "fullVisitorId") %>%
+  left_join(operatingSystem, by = "fullVisitorId") %>%  
+  left_join(deviceCategory, by = "fullVisitorId") %>%
+  left_join(continent, by = "fullVisitorId") %>%
+  left_join(subContinent, by = "fullVisitorId") %>%
+  left_join(campaign, by = "fullVisitorId") %>%
+  left_join(medium, by = "fullVisitorId") %>%
+  left_join(sumTran, by = "fullVisitorId")
+
+write.csv(test_temp,"test1.csv", row.names = F)
+
+# New file ready !!!!!!!
+```
+
+```{r}
+#-----------------------------------------------------
+# Exploration data analysis
+#-----------------------------------------------------
+train <- fread("train1.csv", header = TRUE)
+train$target <- log(train$sumTransactionRevenue+1)
+train$group[train$target > 0] <- "Make revenue"
+train$group[train$target == 0] <- "Don't make revenue"
+
+
+# Overview data 
+plot.lm <- ggplot(train, aes(x = sumPageviews, y = target)) + geom_point(color = "blue") + xlim(0,2000) +labs(title="Scatter Plot",
+       y="ln(sumTransactionRevenue+1", 
+       x="sumPageviews") + theme(plot.title = element_text(size=18)) +  theme(plot.subtitle = element_text(size=16)) + theme(axis.title=element_text(size=16),axis.text=element_text(size=16)) + theme(legend.title = element_text(size=16)) +           theme(legend.text = element_text(size=16))
+png('plot.lm.png') 
+print(plot.lm)
+dev.off()
+
+plot.lm2 <- ggplot(train, aes(x = sumPageviews, y = target, color = group)) + geom_point() + xlim(0,2000) +  labs(title="Scatter Plot",
+       y="ln(sumTransactionRevenue+1", 
+       x="sumPageviews") + theme(plot.title = element_text(size=18)) +  theme(plot.subtitle = element_text(size=16)) + theme(axis.title=element_text(size=16),axis.text=element_text(size=16)) + theme(legend.title = element_text(size=16)) +           theme(legend.text = element_text(size=16)) + theme(legend.position = c(0.8, 0.8))
+png('plot.lm2.png') 
+print(plot.lm2)
+dev.off()
+
+#---------------------------------------------------------------
+# Note: 1. target = log(sumtransaction+1)
+#       2. seperate 2 group: (target = 0, target > 0)
+#       3. group 1:target = 0 have a lot of case (704471 rows,98.6%)
+#       4. group 2:target > 0 (9996 rows,1.4%)
+#       5. after try to plot trend line ->  trend line 
+#          for group2: target > 0 is better than plot overall 
+#       6. Algorithm *****
+#       7. **** predict 1: classify 2 group : transaction 
+#          and  no transaction
+#       8. **** predict 2: for transaction group -> predict value
+#---------------------------------------------------------------
+
+```
+
+```{r}
+#-----------------------------------------------------
+# Select variable to train 
+#-----------------------------------------------------
+train <- fread("train1.csv", header = TRUE)
+test <- fread("test1.csv", header = TRUE)
+P <- train %>% select(fullVisitorId,`channel.(Other)`, channel.Affiliates, channel.Direct, channel.Display, `channel.Organic Search`, `channel.Paid Search`, channel.Referral, channel.Social, `browser.Amazon Silk`, `browser.Android Webview`, browser.Chrome, browser.Edge, browser.Firefox, `browser.Internet Explorer`, browser.Opera, browser.Safari, `browser.Safari (in-app)`, operatingSystem.Android, `operatingSystem.Chrome OS`, operatingSystem.Linux, operatingSystem.Macintosh, operatingSystem.Windows, `operatingSystem.Windows Phone`, operatingSystem.iOS, deviceCategory.desktop, deviceCategory.mobile, deviceCategory.tablet, continent.Africa, continent.Americas,continent.Asia,continent.Europe, continent.Oceania, continent.NA, `medium.(none)`, medium.affiliate, medium.cpc, medium.cpm, medium.NA, medium.organic, medium.referral, `campaignAW - Accessories`, `campaignAW - Apparel`, `campaignAW - Dynamic Search Ads Whole Site`, `campaignAW - Electronics`, `campaignData Share Promo`, `campaignRetail (DO NOT EDIT owners nophakun and tianyu)`, `campaigntest-liyuhz`, campaignNA, sumVisits, sumHits, sumPageviews, sumBounces,sumTransactionRevenue, countVisits)
+
+Q <- test %>% select(fullVisitorId, `channel.(Other)`, channel.Affiliates, channel.Direct, channel.Display, `channel.Organic Search`, `channel.Paid Search`, channel.Referral, channel.Social, `browser.Amazon Silk`, `browser.Android Webview`, browser.Chrome, browser.Edge, browser.Firefox, `browser.Internet Explorer`, browser.Opera, browser.Safari, `browser.Safari (in-app)`, operatingSystem.Android, `operatingSystem.Chrome OS`, operatingSystem.Linux, operatingSystem.Macintosh, operatingSystem.Windows, `operatingSystem.Windows Phone`, operatingSystem.iOS, deviceCategory.desktop, deviceCategory.mobile, deviceCategory.tablet, continent.Africa, continent.Americas,continent.Asia,continent.Europe, continent.Oceania, continent.NA, `medium.(none)`, medium.affiliate, medium.cpc, medium.cpm, medium.NA, medium.organic, medium.referral, `campaignAW - Accessories`, `campaignAW - Apparel`, `campaignAW - Dynamic Search Ads Whole Site`, `campaignAW - Electronics`, `campaignData Share Promo`, `campaignRetail (DO NOT EDIT owners nophakun and tianyu)`, `campaigntest-liyuhz`, campaignNA, sumVisits, sumHits, sumPageviews, sumBounces,sumTransactionRevenue, countVisits)
+
+P[is.na(P)] <- 0
+Q[is.na(Q)] <- 0 
+write.csv(P,"train2.csv", row.names = F)
+write.csv(Q,"test2.csv", row.names = F)
+rm(P); rm(Q)
+```
+
+
+```{r}
+#-----------------------------------------------------
+# Compare mean --- select independent varaible
+# Use these to select variable
+#-----------------------------------------------------
+train <- fread("train2.csv", header = TRUE)
+test <- fread("test2.csv", header = TRUE)
+
+train <- train %>% select(fullVisitorId, `channel.Organic Search`, channel.Referral, channel.Social,channel.Direct, channel.Display, `channel.Paid Search`, browser.Chrome, operatingSystem.Macintosh, deviceCategory.desktop,deviceCategory.mobile, deviceCategory.tablet, continent.Americas, continent.Europe, medium.referral, `campaignAW - Apparel`, `campaignRetail (DO NOT EDIT owners nophakun and tianyu)`, sumVisits,sumHits,sumPageviews,countVisits, sumTransactionRevenue)
+
+colnames(train)[2] <- "channel.Organic"
+colnames(train)[7] <- "channel.Paid"
+colnames(train)[16] <- "campaignAWApparel"
+colnames(train)[17] <- "campaignRetail"
+
+test <- test %>% select(fullVisitorId, `channel.Organic Search`, channel.Referral, channel.Social,channel.Direct, channel.Display, `channel.Paid Search`, browser.Chrome, operatingSystem.Macintosh, deviceCategory.desktop,deviceCategory.mobile, deviceCategory.tablet, continent.Americas, continent.Europe, medium.referral, `campaignAW - Apparel`, `campaignRetail (DO NOT EDIT owners nophakun and tianyu)`, sumVisits,sumHits,sumPageviews,countVisits, sumTransactionRevenue)
+
+colnames(test)[2] <- "channel.Organic"
+colnames(test)[7] <- "channel.Paid"
+colnames(test)[16] <- "campaignAWApparel"
+colnames(test)[17] <- "campaignRetail"
+
+write.csv(train,"train6.csv", row.names = F)
+write.csv(test,"test6.csv", row.names = F)
+
+```
+
+```{r}
+#-----------------------------------------------------
+# make more feature here!
+#-----------------------------------------------------
+train <- fread("train6.csv", header = TRUE)
+test <- fread("test6.csv", header = TRUE)
+
+train$type <- 1
+test$type <- 2
+total <- rbind(train, test)
+
+# log(x+1)
+M <- total[,2:21]
+M1 <- log(M+1)
+colnames(M1) <- paste0(colnames(M1),"Log")
+# x^2
+M2 <- M^2
+colnames(M2) <- paste0(colnames(M2),"^2")
+# Merge M1,M2 to total
+total <- cbind(total,M1)
+total <- cbind(total,M2)
+
+train <- total[total$type == 1]
+test <- total[total$type == 2]
+
+train$type <- NULL
+test$type <- NULL
+
+write.csv(train,"train7.csv", row.names = F)
+write.csv(test,"test7.csv", row.names = F)
+
+```
+
+
+```{r}
+#-----------------------------------------------------
+# LM                 Data                  score 
+#             train3.csv, test3.csv        1.5976
+#             train5.csv, test5.csv        1.5976
+#             train7.csv, test7.csv        1.5822
+#-----------------------------------------------------
+train <- fread("train7.csv", header = TRUE)
+test <- fread("test7.csv", header = TRUE)
+
+train$target <- log(train$sumTransactionRevenue+1)
+train$fullVisitorId <- NULL
+train$sumTransactionRevenue <- NULL
+
+# divide train to 70:30
+set.seed(12345)
+index <-createDataPartition(y=train$target,p=0.7,list=FALSE) 
+train.train <- train[index,]
+train.val <- train[-index,]
+rm(index)
+
+# train model
+model.lm <- step(lm(target~., data = train.train), direction =  "both")
+summary(model.lm)
+pred.lm <- predict(model.lm, newdata = train.train)
+rmsePred.lm <- sqrt(mse(pred.lm, train.train$target))  # 1.8283
+
+pred.lm <- predict(model.lm, newdata = train.val )
+pred.lm <- data_frame(pred.lm)
+pred.lm[pred.lm < 0] <- 0
+rmsePred.lm <- sqrt(mse(pred.lm$pred.lm, train.val$target))  # 1.9688
+
+# Predict
+test$PredictedLogRevenue <- predict(model.lm, newdata = test )
+test$PredictedLogRevenue[test$PredictedLogRevenue < 0] <- 0
+pred <- test %>% select(fullVisitorId,PredictedLogRevenue)
+
+submission <- fread("sample_submission.csv", header = TRUE)
+submission$PredictedLogRevenue <-NULL
+submission <- submission %>%
+  left_join(pred, by = "fullVisitorId")
+write.csv(submission,"submission_lm_7.csv", row.names = F)
+```
+
+
+```{r}
+#-----------------------------------------------------
+# GLM + LM           Data                  score 
+#             train3.csv, test3.csv        1.7537
+#             train5.csv, test5.csv        1.7541 
+#             train7.csv, test7.csv        2.0071  
+#-----------------------------------------------------
+train <- fread("train7.csv", header = TRUE)
+train$group[train$sumTransactionRevenue > 0] <- 1
+train$group[train$sumTransactionRevenue == 0] <- 0
+
+# divide train to 70:30
+set.seed(12345)
+index <-createDataPartition(y=train$group,p=0.7,list=FALSE) 
+train.train <- train[index,]
+train.val <- train[-index,]
+
+train.train.group1 <- train.train[train.train$group == 1]
+train.train$fullVisitorId <- NULL
+train.train$sumTransactionRevenue <- NULL
+rm(index)
+
+# train glm model  
+set.seed(12345)
+model.glm <- glm(group~., data = train.train, family = "binomial")
+confusionMatrix(table(round(model.glm$fitted.values),train.train$group)) # accurate = 0.9874
+
+pred.glm <- predict(model.glm, newdata = train.val, type = "response") 
+confusionMatrix(table(round(pred.glm),train.val$group)) # 0.9874
+
+# train lm model - case group 1 -- have revenue 
+train.train.group1$fullVisitorId <- NULL
+train.train.group1$group <- NULL
+train.train.group1$target <- log(train.train.group1$sumTransactionRevenue+1)
+train.train.group1$sumTransactionRevenue <- NULL
+model.lm <- step(lm(target~., data = train.train.group1), direction = "both")
+rmseModel.lm <- sqrt(mse(model.lm$fitted.values, train.train.group1$target))  # 1.1041
+
+train.val.group1 <- train.val[train.val$group == 1]
+train.val.group1$target <- log(train.val.group1$sumTransactionRevenue+1)
+pred.lm <- predict(model.lm, newdata = train.val.group1)
+pred.lm <- data.frame(pred.lm)
+pred.lm[pred.lm < 0] <- 0
+rmsePred.lm <- sqrt(mse(pred.lm, train.val.group1$target))  # 1.1307
+
+# Combine glm with lm 
+
+# first check with train.val
+train.val$target <- log(train.val$sumTransactionRevenue+1)
+pred.glm <- predict(model.glm, newdata = train.val, type = "response") 
+pred.glm <- round(pred.glm)
+pred.glm <- data.frame(pred.glm)
+
+pred.lm <- predict(model.lm, newdata = train.val)
+pred.lm <- data.frame(pred.lm)
+pred.combine <- cbind(pred.glm,pred.lm)
+pred.combine$pred.lm[pred.combine$pred.glm == 0] <- 0 
+pred.combine$pred.glm <- NULL
+rmsePred.combine <- sqrt(mse(pred.combine$pred.lm, train.val$target)) # 1.9900
+rm(pred.combine)
+
+# Predict GLM + LM 
+test <- fread("test7.csv", header = TRUE)
+
+pred.glm <- predict(model.glm, newdata = test, type = "response")
+pred.glm <- round(pred.glm)
+pred.glm <- data.frame(pred.glm)
+
+pred.lm <- predict(model.lm, newdata = test)
+pred.lm <- data.frame(pred.lm)
+pred.lm[pred.lm < 0] <- 0 
+pred.combine <- cbind(pred.glm,pred.lm)
+pred.combine$pred.lm[pred.combine$pred.glm == 0] <- 0 
+test$PredictedLogRevenue <- pred.combine$pred.lm
+pred <- test %>% select(fullVisitorId,PredictedLogRevenue)
+
+submission <- fread("sample_submission.csv", header = TRUE)
+submission$PredictedLogRevenue <-NULL
+submission <- submission %>%
+  left_join(pred, by = "fullVisitorId")
+write.csv(submission,"submission_glm_lm_7.csv", row.names = F)
+
+```
+
+```{r}
+#-----------------------------------------------------
+# GBM + LM           Data                  score 
+#             train3.csv, test3.csv        1.7201
+#             train7.csv, test7.csv        
+#-----------------------------------------------------
+train <- fread("train7.csv", header = TRUE)
+train$group[train$sumTransactionRevenue > 0] <- 1
+train$group[train$sumTransactionRevenue == 0] <- 0
+
+# divide train to 70:30
+set.seed(12345)
+index <-createDataPartition(y=train$group,p=0.7,list=FALSE) 
+train.train <- train[index,]
+train.val <- train[-index,]
+
+train.train.group1 <- train.train[train.train$group == 1]
+train.train$fullVisitorId <- NULL
+train.train$sumTransactionRevenue <- NULL
+rm(index)
+
+# train glm model  
+set.seed(12345)
+model.gbm<-gbm(group~., data=train.train, n.trees=150, shrinkage=0.1, interaction.depth=3, train.fraction=1, bag.fraction=0.8, verbose=T)
+#model.gbm <- train(group~., data = train.train, method = "gbm")
+#---------------------
+# best tune
+# n.trees = 150  
+# interaction.depth = 3
+# shrinkage = 0.1
+# n.minobsinnode = 10
+#---------------------
+pred.gbm <- predict.gbm(model.gbm, newdata = train.train, n.trees=150, type="response")
+#pred.gbm <- predict(model.gbm, newgata = train.train, type = "raw")
+confusionMatrix(table(round(pred.gbm),train.train$group)) # accurate = 0.9879
+
+pred.gbm <- predict(model.gbm, newdata = train.val, n.trees=150, type="response") 
+confusionMatrix(table(round(pred.gbm),train.val$group)) # 0.9880
+
+# train lm model - case group 1 -- have revenue 
+train.train.group1$fullVisitorId <- NULL
+train.train.group1$group <- NULL
+train.train.group1$target <- log(train.train.group1$sumTransactionRevenue+1)
+train.train.group1$sumTransactionRevenue <- NULL
+model.lm <- step(lm(target~., data = train.train.group1), direction = "both")
+rmseModel.lm <- sqrt(mse(model.lm$fitted.values, train.train.group1$target))  # 1.1041
+
+train.val.group1 <- train.val[train.val$group == 1]
+train.val.group1$target <- log(train.val.group1$sumTransactionRevenue+1)
+pred.lm <- predict(model.lm, newdata = train.val.group1)
+pred.lm <- data.frame(pred.lm)
+pred.lm[pred.lm < 0] <- 0
+rmsePred.lm <- sqrt(mse(pred.lm$pred.lm, train.val.group1$target))  # 1.1307
+
+# Combine gbm with lm 
+
+# first check with train.val
+train.val$target <- log(train.val$sumTransactionRevenue+1)
+pred.gbm <- predict(model.gbm, newdata = train.val, n.trees=150, type="response") 
+pred.gbm <- round(pred.gbm)
+pred.gbm <- data.frame(pred.gbm)
+
+pred.lm <- predict(model.lm, newdata = train.val)
+pred.lm <- data.frame(pred.lm)
+pred.combine <- cbind(pred.gbm,pred.lm)
+pred.combine$pred.lm[pred.combine$pred.gbm == 0] <- 0 
+pred.combine$pred.glm <- NULL
+rmsePred.combine <- sqrt(mse(pred.combine$pred.lm, train.val$target)) # 1.9395
+rm(pred.combine)
+
+# Predict GBM + LM 
+test <- fread("test7.csv", header = TRUE)
+
+pred.gbm <- predict(model.gbm, newdata = test, n.trees=150, type="response") 
+pred.gbm <- round(pred.gbm)
+pred.gbm <- data.frame(pred.gbm)
+
+pred.lm <- predict(model.lm, newdata = test)
+pred.lm <- data.frame(pred.lm)
+pred.lm[pred.lm < 0] <- 0
+pred.combine <- cbind(pred.gbm,pred.lm)
+pred.combine$pred.lm[pred.combine$pred.gbm == 0] <- 0 
+test$PredictedLogRevenue <- pred.combine$pred.lm
+pred <- test %>% select(fullVisitorId,PredictedLogRevenue)
+
+submission <- fread("sample_submission.csv", header = TRUE)
+submission$PredictedLogRevenue <-NULL
+submission <- submission %>%
+  left_join(pred, by = "fullVisitorId")
+write.csv(submission,"submission_gbm_lm_7.csv", row.names = F)
+
+
+# Quickly combine
+# combine GLM_LM + LM  score = 1.6650
+# combine GBM_LM + LM  score = 1.5757
+# combine GLM_LM + GBM_LM  score = 1.7073
+```
+
+
