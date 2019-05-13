@@ -1,5 +1,8 @@
 # GA-Customer-Revenue-Prediction
 
+This prject from kaggle.com detial here: 
+https://www.kaggle.com/c/ga-customer-revenue-prediction/overview
+
 Use R to predict GA-Customer-Revenue
 
 Use 3 Model
